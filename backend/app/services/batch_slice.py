@@ -38,6 +38,8 @@ class BatchSliceService(BaseModuleService):
 
     # 已处理的batch_id注册表（防重复）
     _processed_batches: set[str] = set()
+    # 投递版本序号（防同毫秒批次号冲突）
+    _publish_seq: int = 0
 
     def execute_slice(self, entry_id: int) -> dict[str, Any]:
         """执行分片切割：从源表生成模拟数据行。
@@ -101,9 +103,9 @@ class BatchSliceService(BaseModuleService):
             data_rows = data_rows[:len(data_rows) // 2]
             self._interrupted_write = True
 
-        # 通过流水线写入数据产物
-        batch_id = f"{batch_no}_{int(time.time())}"
-        self.produce_artifact(data_rows, batch_id)
+        # 通过流水线写入数据产物，附带来源证明供下游按归属核验
+        batch_id = f"{batch_no}_{int(time.time() * 1000)}"
+        self.produce_artifact(data_rows, batch_id, provenance=self._provenance(entry))
 
         self._processed_batches.add(batch_no)
         entry["status"] = "执行中"
@@ -115,6 +117,41 @@ class BatchSliceService(BaseModuleService):
             "rows_ingested": len(data_rows),
             "dirty_rows": len(dirty_rows),
             "total_range": rows_count,
+            "pipeline": self.PIPELINE,
+        }
+
+    def _provenance(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """本分片产物的来源证明：产出条目身份 + 源表名称。"""
+        return {
+            "producer_module": self.MODULE,
+            "producer_entry_id": int(entry.get("id", 0)),
+            "source_kind": "batch",
+            "批次编号": entry.get("批次编号"),
+            "源表名称": entry.get("源表名称"),
+        }
+
+    def publish_slice(self, entry_id: int, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """投递一个归属明确的新版分片：以登记条目身份发布显式数据行。
+
+        与计划执行（execute_slice）共用同一条流水线，但版本独立，
+        供上游在不重跑整批的情况下向合并侧投递新的分片版本。
+        """
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return {"ok": False, "reason": f"批次 {entry_id} 不存在"}
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            return {"ok": False, "reason": "分片数据行必须是对象数组"}
+
+        batch_no = str(entry.get("批次编号", ""))
+        self._publish_seq += 1
+        batch_id = f"{batch_no}_PUB_{int(time.time() * 1000)}_{self._publish_seq}"
+        result = self.produce_artifact(rows, batch_id, provenance=self._provenance(entry))
+        return {
+            "ok": True,
+            "batch": batch_no,
+            "version": result.get("version"),
+            "rows_ingested": result.get("ingested", 0),
+            "dirty_details": result.get("dirty_details", []),
             "pipeline": self.PIPELINE,
         }
 

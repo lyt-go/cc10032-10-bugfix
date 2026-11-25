@@ -16,6 +16,7 @@
 │   └── vite.config.ts        dev server 配置（open: false）
 ├── backend/                  FastAPI（Python） 后端
 │   ├── app/routers/resource.py  通用查询/导出/登记/动作接口
+│   ├── app/routers/merge_inputs.py  合并输入清单/预览/发布与上游投递接口
 │   ├── app/services/<key>.py    每个模块独立领域逻辑
 │   ├── app/services/base.py     共享服务骨架
 │   └── app/store.py          内存数据仓库与示例数据
@@ -76,6 +77,14 @@ npm run dev
   `frontend/src/domain/<模块>.ts`，用于承载真实业务差异并维持36题位容量。
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
+- 流批合并按来源归属取数：合并计划只读取与声明来源（批式来源/流式来源）
+  核验一致的已发布版本，归属未确认的产物留待核对且不读取。
+  - `GET  /api/merge_plan/{id}/inputs`   合并输入清单（审计只读）
+  - `POST /api/merge_plan/{id}/preview`  打开合并预览（留下来源证明）
+  - `GET  /api/merge_plan/{id}/preview`  查看已打开预览的来源证明
+  - `POST /api/merge_plan/{id}/publish`  执行发布（回写实际版本与待补范围）
+  - `POST /api/batch_slice/{id}/publish` 投递归属明确的新版分片
+  - `POST /api/stream_lookup/{id}/publish` 投递归属明确的新版关联结果
 
 领域：数据工程
 子方向：数仓与数据湖

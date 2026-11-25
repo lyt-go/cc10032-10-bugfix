@@ -28,6 +28,36 @@ class DataPipeline:
         self._batch_registry: set[str] = set()  # 防重复批次
         self._last_checkpoint: dict[str, Any] = {}  # 中断恢复点
         self._interrupted = False
+        self._version_seq = 0  # 版本序号：保证同毫秒的发布也有不同版本号
+        # 带来源证明的版本化发布记录：下游按计划归属选版本，而不是直接读全局产物
+        self._publications: list[dict[str, Any]] = []
+
+    def publish(
+        self,
+        rows: list[dict[str, Any]],
+        batch_id: str,
+        provenance: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """发布一个版本化产物快照，附带来源证明。
+
+        provenance 为空时按历史产物处理：下游只能依靠行内源名称核对归属。
+        """
+        version = self._make_version("publish")
+        publication = {
+            "version": version,
+            "batch_id": batch_id,
+            "provenance": dict(provenance) if provenance else None,
+            "row_count": len(rows),
+            "rows": [dict(row) for row in rows],
+            "ts": time.time(),
+        }
+        self._publications.append(publication)
+        self._versions.append(version)
+        return publication
+
+    def publications(self) -> list[dict[str, Any]]:
+        """按发布先后返回全部版本化产物快照。"""
+        return list(self._publications)
 
     def ingest(self, rows: list[dict[str, Any]], batch_id: str) -> tuple[int, list[str]]:
         """摄入数据行，返回 (成功行数, 脏行详情列表)"""
@@ -97,8 +127,9 @@ class DataPipeline:
         return issues
 
     def _make_version(self, tag: str) -> str:
+        self._version_seq += 1
         ts = str(int(time.time() * 1000))
-        raw = f"{self.name}:{tag}:{ts}"
+        raw = f"{self.name}:{tag}:{ts}:{self._version_seq}"
         return hashlib.md5(raw.encode()).hexdigest()[:12]
 
     def _save_checkpoint(self, stage: str, count: int) -> None:

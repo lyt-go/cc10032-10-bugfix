@@ -29,3 +29,10 @@ class EntryPayload(BaseModel):
 class ActionPayload(BaseModel):
     action: str
     remark: str | None = None
+
+
+class RowsPayload(BaseModel):
+    """上游投递数据行：用于分片/关联的新版本发布。"""
+
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    remark: str | None = None

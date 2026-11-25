@@ -106,15 +106,32 @@ class BaseModuleService:
             upstream_data[mod] = list(store.rows(mod))
         return upstream_data
 
-    def produce_artifact(self, data: list[dict[str, Any]], batch_id: str) -> dict[str, Any]:
-        """产出数据制品，通过流水线写入并返回结果"""
+    def produce_artifact(
+        self,
+        data: list[dict[str, Any]],
+        batch_id: str,
+        provenance: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """产出数据制品，通过流水线写入并返回结果。
+
+        provenance 记录本批产物的来源身份（产出模块、条目、源名称），
+        流水线会为通过校验的行留下一个可核对的版本化发布；
+        缺省为空时按历史产物处理，下游只能依靠行内源名称核对归属。
+        """
         if not self.PIPELINE:
             return {"ok": False, "reason": "模块未绑定流水线"}
         pl = store.pipeline(self.PIPELINE)
         if pl is None:
             pl = store.create_pipeline(self.PIPELINE, self.UPSTREAM_MODULES, self.MODULE)
+        before = len(pl._artifacts)
         ingested, dirty = pl.ingest(data, batch_id)
-        return {"ok": True, "pipeline": self.PIPELINE, "ingested": ingested, "dirty_details": dirty}
+        accepted = not any("重复批次" in detail for detail in dirty)
+        version = None
+        if accepted:
+            clean_rows = pl._artifacts[before:before + ingested]
+            version = pl.publish(clean_rows, batch_id, provenance=provenance)["version"]
+        return {"ok": True, "pipeline": self.PIPELINE, "ingested": ingested,
+                "dirty_details": dirty, "version": version}
 
     def pipeline_snapshot(self) -> dict[str, Any]:
         """获取当前流水线版本化快照"""

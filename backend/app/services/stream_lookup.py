@@ -32,6 +32,9 @@ class StreamLookupService(BaseModuleService):
     DOWNSTREAM_MODULES = ["merge_plan"]
     PRODUCES_ARTIFACT = "流式关联结果记录"
 
+    # 投递版本序号（防同毫秒批次号冲突）
+    _publish_seq: int = 0
+
     def execute_lookup(self, entry_id: int, left_events: list[dict[str, Any]]) -> dict[str, Any]:
         """执行流式关联：左流数据与右表维表Join。
 
@@ -78,8 +81,8 @@ class StreamLookupService(BaseModuleService):
                 elif unmatched_policy == "keep":
                     matched.append({**event, "dim_value": None})
 
-        batch_id = f"LOOKUP_{entry_id}_{int(time.time())}"
-        self.produce_artifact(matched, batch_id)
+        batch_id = f"LOOKUP_{entry_id}_{int(time.time() * 1000)}"
+        self.produce_artifact(matched, batch_id, provenance=self._provenance(entry))
 
         return {
             "ok": True,
@@ -91,12 +94,55 @@ class StreamLookupService(BaseModuleService):
             "unmatched_samples": unmatched[:3],
         }
 
-    def emit_join_results_for_merge(self) -> list[dict[str, Any]]:
-        """向 merge_plan 暴露关联结果"""
+    def _provenance(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """本关联产物的来源证明：产出条目身份 + 左流来源。"""
+        return {
+            "producer_module": self.MODULE,
+            "producer_entry_id": int(entry.get("id", 0)),
+            "source_kind": "stream",
+            "规则编号": entry.get("规则编号"),
+            "左流来源": entry.get("左流来源"),
+            "右表来源": entry.get("右表来源"),
+        }
+
+    def publish_lookup(self, entry_id: int, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """投递一个归属明确的新版关联结果：以登记规则身份发布显式数据行。"""
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return {"ok": False, "reason": f"规则 {entry_id} 不存在"}
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            return {"ok": False, "reason": "关联数据行必须是对象数组"}
+
+        self._publish_seq += 1
+        batch_id = f"LOOKUP_{entry_id}_PUB_{int(time.time() * 1000)}_{self._publish_seq}"
+        result = self.produce_artifact(rows, batch_id, provenance=self._provenance(entry))
+        return {
+            "ok": True,
+            "rule": entry.get("规则编号"),
+            "version": result.get("version"),
+            "rows_ingested": result.get("ingested", 0),
+            "dirty_details": result.get("dirty_details", []),
+            "pipeline": self.PIPELINE,
+        }
+
+    def emit_join_results_for_merge(self, entry_id: int) -> list[dict[str, Any]]:
+        """向 merge_plan 暴露关联结果：只含归属本规则条目的已发布版本，
+        不再把全局共享流水线里其他来源的产物一并暴露出去。"""
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return []
         pl = store.pipeline(self.PIPELINE)
-        if pl and pl._artifacts:
-            return pl._artifacts[:20]
-        return []
+        if pl is None:
+            return []
+        rows: list[dict[str, Any]] = []
+        for publication in pl.publications():
+            provenance = publication.get("provenance") or {}
+            if (
+                provenance.get("producer_module") == self.MODULE
+                and provenance.get("producer_entry_id") == entry_id
+            ):
+                rows.extend(publication["rows"])
+        return rows[:20]
 
     def domain_snapshot(self) -> dict[str, Any]:
         base = super().domain_snapshot()

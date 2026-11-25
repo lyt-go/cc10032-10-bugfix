@@ -189,6 +189,9 @@ class TestStreamLookupToMergePlan:
         mp = service_for("merge_plan")
         entry = store.find("merge_plan", 3)
         if entry:
+            # 来源归属：计划只能读取与声明来源一致的已核验产物
+            entry["批式来源"] = str(be.get("源表名称")) if be else "ods_trade_ticks"
+            entry["流式来源"] = "kafka-trade-ticks"
             entry["status"] = "运行中"
             result = mp.execute_merge(3)
             assert result["ok"] is True
@@ -482,7 +485,7 @@ class TestFailureScenarios:
         assert "artifact_count" in snap
 
     def test_merge_plan_no_batch_data(self):
-        """验证没有batch数据时的合并"""
+        """验证无已核验输入时发布暂缓，不读取归属未确认的全局产物"""
         mp = service_for("merge_plan")
         # 创建新条目
         entry_id = max((int(r.get("id", 0)) for r in store.rows("merge_plan")), default=0) + 1
@@ -491,8 +494,9 @@ class TestFailureScenarios:
             "合并键列": "id", "冲突解决": "stream_win", "输出路径": "/out",
             "status": "运行中", "pending": True, "abnormal": False})
         result = mp.execute_merge(entry_id)
-        assert result["ok"] is True
-        # 因为流水线已存在数据，可能会有结果
+        # 修复后：共享流水线里其他计划的产物不再被无归属计划读取，发布暂缓
+        assert result["ok"] is False
+        assert result["deferred"] is True
 
 
 # ============================================================
@@ -522,6 +526,9 @@ class TestEndToEndCrossModule:
         mp = service_for("merge_plan")
         merge_entry = store.find("merge_plan", 3)
         if merge_entry:
+            # 来源归属：与 batch_slice 3 / stream_lookup 3 的产物对齐
+            merge_entry["批式来源"] = str(batch_entry.get("源表名称")) if batch_entry else "ods_trade_ticks"
+            merge_entry["流式来源"] = "kafka-trade-ticks"
             merge_entry["status"] = "运行中"
             merge_result = mp.execute_merge(3)
             assert merge_result["ok"] is True
